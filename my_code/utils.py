@@ -1,4 +1,7 @@
-import json, os
+import json
+import os
+import nltk
+
 
 def read_json(json, tag: str):
     if tag in json:
@@ -69,6 +72,6 @@ def get_words_from_papers(paper_dict):
         if sections is not None:
             for x in sections:
                 text = x['text']
-                papers[id].extend(text.split())
+                papers[id].extend(nltk.word_tokenize(text))
     return papers
 
