@@ -1,17 +1,18 @@
 import numpy as np
 import utils
+import collections
 
 START_WORD = '[START]'
 STOP_WORD = '[STOP]'
 
 
-def train(papers, reviews, training_model):
+def train(papers, reviews, training_model, bernoulli):
     total_accepted = 0
     total_papers = 0
     paper_words = utils.get_words_from_papers(papers)
     for id in papers.keys():
-        #title, sections, references, abstract, year, emails = papers[id]
         rtitle, rabstract, accepted, per_reviews = reviews[id]
+        seen_words = dict()
 
         total_papers += 1
         if accepted:
@@ -24,6 +25,14 @@ def train(papers, reviews, training_model):
 
             if word not in training_model[last_word]:
                 training_model[last_word][word] = (0, 0)
+
+            if bernoulli:
+                if last_word in seen_words and word in seen_words[last_word]:
+                    continue
+                if last_word not in seen_words:
+                    seen_words[last_word] = set()
+                if word not in seen_words[last_word]:
+                    seen_words[last_word].add(word)
 
             accepted_count, total = training_model[last_word][word]
             if accepted:
@@ -42,7 +51,19 @@ def train(papers, reviews, training_model):
             training_model[last_word][word] = (accepted_count + 1, total + 1)
         else:
             training_model[last_word][word] = (accepted_count, total + 1)
-    return training_model, total_accepted, total_papers
+
+    prob_model = dict()
+    for last_word in training_model:
+        for word in training_model[last_word]:
+            accepted, total = training_model[last_word][word]
+            if accepted > 0 and accepted / total < 1.0:
+                prob_model[(last_word, word)] = accepted / total
+
+    best = collections.Counter(prob_model)
+    for word, prob in best.most_common(10):
+        print(word, prob, training_model[word[0]][word[1]])
+
+    return training_model, total_accepted / total_papers
 
 
 def add_unseen_vocab(data, papers):
@@ -77,7 +98,7 @@ def smooth_words(data, smoothing_alpha=0.01):
     return new_data
 
 
-def evaluate_data(data, papers, reviews, total_accepted_papers, total_test_papers):
+def evaluate_data(data, papers, reviews, prob_accepted, bernoulli):
     actual_matched = 0
     matched_total = 0
     total_papers = 0
@@ -85,26 +106,33 @@ def evaluate_data(data, papers, reviews, total_accepted_papers, total_test_paper
     false_positive = 0
     false_negative = 0
 
-    accepted_probability = total_accepted_papers / total_test_papers
-    rejected_probability = (total_test_papers - total_accepted_papers) / total_test_papers
-
     paper_words = utils.get_words_from_papers(papers)
     for id in paper_words.keys():
+        seen_words = dict()
         acceptance = 0
         rejection = 0
         rtitle, rabstract, accepted, per_reviews = reviews[id]
         last_word = START_WORD
         for word in paper_words[id]:
+            if bernoulli:
+                if last_word in seen_words and word in seen_words[last_word]:
+                    last_word = word
+                    continue
+                if last_word not in seen_words:
+                    seen_words[last_word] = set()
+                if word not in seen_words[last_word]:
+                    seen_words[last_word].add(word)
+
+            if word not in data[last_word]:
+                print(id, last_word, word)
             accepted_count, total = data[last_word][word]
-            if accepted_count == 0:
-                rejection += 1
 
             acceptance += np.log2(accepted_count / total)
             rejection += np.log2((total - accepted_count) / total)
             last_word = word
 
-        acceptance += np.log2(accepted_probability)
-        rejection += np.log2(rejected_probability)
+        acceptance += np.log2(prob_accepted)
+        rejection += np.log2(1 - prob_accepted)
 
         guess_accept = acceptance > rejection
 
@@ -123,9 +151,10 @@ def evaluate_data(data, papers, reviews, total_accepted_papers, total_test_paper
 
     print("Correctly matched:", matched_total, "; papers accepted:", actual_matched, "; papers guessed accepted:", guess_matched, "; total papers:", total_papers,
           "; accuracy:", matched_total / total_papers, "; false negatives:", false_negative, "; false positives:", false_positive)
+    print('Accuracy:', matched_total / total_papers, 'majority:', (total_papers - actual_matched) / total_papers)
 
 
-def test(*directory):
+def test(*directory, bernoulli, include_dev=False):
     data = dict()
     all_papers = {}
     all_reviews = {}
@@ -135,19 +164,24 @@ def test(*directory):
         review_train_dir = x + '/train/reviews'
         all_reviews.update(utils.parse_reviews(review_train_dir))
 
-    data, total_accepted, total_papers = train(all_papers, all_reviews, data)
+    data, prob_accepted = train(all_papers, all_reviews, data, bernoulli)
 
     all_papers = {}
     all_reviews = {}
     for x in directory:
-        paper_dev_dir = x + '/dev/parsed_pdfs'
+        if include_dev:
+            paper_dev_dir = x + '/dev/parsed_pdfs'
+            all_papers.update(utils.parse_pdfs(paper_dev_dir))
+            review_dev_dir = x + '/dev/reviews'
+            all_reviews.update(utils.parse_reviews(review_dev_dir))
+        paper_dev_dir = x + '/test/parsed_pdfs'
         all_papers.update(utils.parse_pdfs(paper_dev_dir))
-        review_dev_dir = x + '/dev/reviews'
+        review_dev_dir = x + '/test/reviews'
         all_reviews.update(utils.parse_reviews(review_dev_dir))
 
     data = add_unseen_vocab(data, all_papers)
     data = smooth_words(data)
 
     print("Bigram test for ", directory)
-    evaluate_data(data, all_papers, all_reviews, total_accepted, total_papers)
+    evaluate_data(data, all_papers, all_reviews, prob_accepted, bernoulli)
 
